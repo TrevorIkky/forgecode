@@ -195,10 +195,15 @@ impl<A: API + ConsoleWriter + 'static, F: Fn(ForgeConfig) -> A + Send + Sync> UI
         Ok(rows)
     }
 
-    /// Displays banner only if user is in interactive mode.
-    fn display_banner(&self) -> Result<()> {
+    /// Displays banner only if user is in interactive mode. Resolves the
+    /// currently active agent's model so the banner's "Switch model" tip can
+    /// show what's in use.
+    async fn display_banner(&self) -> Result<()> {
         if self.cli.is_interactive() {
-            banner::display(false)?;
+            let active_agent = self.api.get_active_agent().await;
+            let model = self.get_agent_model(active_agent).await;
+            let model_str = model.as_ref().map(|m| m.to_string());
+            banner::display(false, model_str.as_deref())?;
         }
         Ok(())
     }
@@ -220,7 +225,7 @@ impl<A: API + ConsoleWriter + 'static, F: Fn(ForgeConfig) -> A + Send + Sync> UI
         self.cli.conversation_id = None;
 
         self.spinner.reset();
-        self.display_banner()?;
+        self.display_banner().await?;
         self.trace_user();
         self.hydrate_caches();
         Ok(())
@@ -316,18 +321,12 @@ impl<A: API + ConsoleWriter + 'static, F: Fn(ForgeConfig) -> A + Send + Sync> UI
             None
         };
 
-        // Prompt the user for input
-        let agent_id = self.api.get_active_agent().await.unwrap_or_default();
-        let model = self
-            .get_agent_model(self.api.get_active_agent().await)
-            .await;
+        // Prompt the user for input. Model is no longer rendered on the right
+        // prompt — it lives in the startup banner.
         let reasoning_effort = self.api.get_reasoning_effort().await.ok().flatten();
-        let mut forge_prompt = ForgePrompt::new(self.state.cwd.clone(), agent_id);
+        let mut forge_prompt = ForgePrompt::new(self.state.cwd.clone());
         if let Some(u) = usage {
             forge_prompt.usage(u);
-        }
-        if let Some(m) = model {
-            forge_prompt.model(m);
         }
         if let Some(e) = reasoning_effort {
             forge_prompt.reasoning_effort(e);
@@ -361,7 +360,7 @@ impl<A: API + ConsoleWriter + 'static, F: Fn(ForgeConfig) -> A + Send + Sync> UI
         }
 
         // Display the banner in dimmed colors since we're in interactive mode
-        self.display_banner()?;
+        self.display_banner().await?;
         self.init_state(true).await?;
 
         self.trace_user();
@@ -639,7 +638,10 @@ impl<A: API + ConsoleWriter + 'static, F: Fn(ForgeConfig) -> A + Send + Sync> UI
                 return Ok(());
             }
             TopLevelCommand::Banner => {
-                banner::display(true)?;
+                let active_agent = self.api.get_active_agent().await;
+                let model = self.get_agent_model(active_agent).await;
+                let model_str = model.as_ref().map(|m| m.to_string());
+                banner::display(true, model_str.as_deref())?;
                 return Ok(());
             }
             TopLevelCommand::Config(config_group) => {

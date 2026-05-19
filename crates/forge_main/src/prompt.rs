@@ -2,9 +2,8 @@ use std::borrow::Cow;
 use std::fmt::Write;
 use std::path::PathBuf;
 
-use convert_case::{Case, Casing};
 use derive_setters::Setters;
-use forge_api::{AgentId, Effort, ModelId, Usage};
+use forge_api::{Effort, Usage};
 use nu_ansi_term::{Color, Style};
 use reedline::{Prompt, PromptHistorySearchStatus};
 
@@ -14,14 +13,14 @@ use crate::utils::humanize_number;
 // Constants
 const MULTILINE_INDICATOR: &str = "::: ";
 
-// Nerd font symbols — left prompt
-const DIR_SYMBOL: &str = "\u{ea83}"; // 󪃃  folder icon
+// Branch glyph still rendered when a git branch is detected; folder/chevron/agent
+// glyphs were removed to keep the prompt font-agnostic across terminals without
+// a Nerd-Font patched typeface.
 const BRANCH_SYMBOL: &str = "\u{f418}"; //   branch icon
-const SUCCESS_SYMBOL: &str = "\u{f013e}"; // 󰄾  chevron
 
-// Nerd font symbols — right prompt (ZSH rprompt)
-const AGENT_SYMBOL: &str = "\u{f167a}";
-const MODEL_SYMBOL: &str = "\u{ec19}";
+// Plain Unicode "FISHEYE" (U+25C9) — filled-circle status glyph that renders
+// without requiring a Nerd-Font patched typeface.
+const STATUS_DOT: &str = "\u{25c9}";
 
 /// Terminal width at which the reasoning effort label switches from the
 /// compact three-letter form (e.g. `MED`) to the full uppercase label
@@ -35,11 +34,9 @@ const WIDE_TERMINAL_THRESHOLD: usize = 100;
 pub struct ForgePrompt {
     pub cwd: PathBuf,
     pub usage: Option<Usage>,
-    pub agent_id: AgentId,
-    pub model: Option<ModelId>,
-    /// Currently configured reasoning effort level for the active model,
-    /// rendered to the right of the model when set. `Effort::None` is
-    /// suppressed (see [`ForgePrompt::render_prompt_right`]).
+    /// Currently configured reasoning effort level for the active model.
+    /// `Effort::None` is suppressed (see
+    /// [`ForgePrompt::render_prompt_right`]).
     pub reasoning_effort: Option<Effort>,
     pub git_branch: Option<String>,
 }
@@ -47,13 +44,11 @@ pub struct ForgePrompt {
 impl ForgePrompt {
     /// Creates a new `ForgePrompt`, resolving the git branch once at
     /// construction time.
-    pub fn new(cwd: PathBuf, agent_id: AgentId) -> Self {
+    pub fn new(cwd: PathBuf) -> Self {
         let git_branch = get_git_branch();
         Self {
             cwd,
             usage: None,
-            agent_id,
-            model: None,
             reasoning_effort: None,
             git_branch,
         }
@@ -70,18 +65,14 @@ impl Prompt for ForgePrompt {
     fn render_prompt_left(&self) -> Cow<'_, str> {
         // Left prompt layout:
         //
-        //   AGENT_NAME  󪃃 dir   branch
-        //   󰄾
+        //   dir   branch
         //
-        // Colors:
-        //   agent  → bold white  (identifies the active agent)
-        //   dir    → bold cyan
-        //   branch → bold green
-        //   chevron → bold green
+        // followed by a blank input line so the cursor sits at column 0 with no
+        // Nerd-Font glyph in front of it.
 
         let dir_style = Style::new().fg(Color::Cyan).bold();
         let branch_style = Style::new().fg(Color::LightGreen).bold();
-        let chevron_style = Style::new().fg(Color::LightGreen).bold();
+        let arrow_style = Style::new().fg(Color::LightGreen).bold();
 
         let current_dir = self
             .cwd
@@ -92,13 +83,8 @@ impl Prompt for ForgePrompt {
 
         let mut result = String::with_capacity(80);
 
-        // Directory — folder icon + name, bold cyan
-        write!(
-            result,
-            "{}",
-            dir_style.paint(format!("{DIR_SYMBOL} {current_dir}"))
-        )
-        .unwrap();
+        // Directory name, bold cyan
+        write!(result, "{}", dir_style.paint(current_dir.as_str())).unwrap();
 
         // Git branch — branch icon + name, bold green (only when present and
         // different from the directory name, matching existing behaviour)
@@ -113,38 +99,23 @@ impl Prompt for ForgePrompt {
             .unwrap();
         }
 
-        // Second line: success chevron
-        write!(result, "\n{} ", chevron_style.paint(SUCCESS_SYMBOL)).unwrap();
+        // Second line: a plain Unicode arrow (U+276F) that renders without
+        // requiring a Nerd-Font patched typeface.
+        write!(result, "\n{} ", arrow_style.paint("\u{276f}")).unwrap();
 
         Cow::Owned(result)
     }
 
     fn render_prompt_right(&self) -> Cow<'_, str> {
-        // Right prompt layout: agent · tokens · cost · model
-        // Active (tokens > 0): bright white for agent/tokens, green for cost
+        // Right prompt layout: tokens · cost · `◉ <effort> · :effort`
+        // Active (tokens > 0): bright white for tokens, green for cost
         // Inactive (no tokens): all segments dimmed
+        // The model segment was removed — model is shown in the startup banner.
 
         let total_tokens = self.usage.as_ref().map(|u| u.total_tokens);
         let active = total_tokens.map(|t| *t > 0).unwrap_or(false);
 
-        let agent_color = if active {
-            Color::LightGray
-        } else {
-            Color::DarkGray
-        };
         let mut result = String::with_capacity(64);
-
-        // Agent name with nerd font symbol
-        let agent_str = format!(
-            "{AGENT_SYMBOL} {}",
-            self.agent_id.as_str().to_case(Case::UpperSnake)
-        );
-        write!(
-            result,
-            " {}",
-            Style::new().bold().fg(agent_color).paint(&agent_str)
-        )
-        .unwrap();
 
         // Token count (only shown when active)
         if let Some(tokens) = total_tokens
@@ -176,33 +147,21 @@ impl Prompt for ForgePrompt {
             .unwrap();
         }
 
-        // Model with nerd font symbol
-        if let Some(model) = self.model.as_ref() {
-            let model_str = model.to_string();
-            let short_model = model_str.split('/').next_back().unwrap_or(model.as_str());
-            let model_label = format!("{MODEL_SYMBOL} {short_model}");
-            let color = if active {
-                Color::LightMagenta
-            } else {
-                Color::DarkGray
-            };
-            write!(result, " {}", Style::new().fg(color).paint(&model_label)).unwrap();
-        }
-
-        // Reasoning effort — rendered to the right of the model, matching the
-        // ZSH rprompt. `Effort::None` is suppressed (see zsh/rprompt.rs). On
-        // narrow terminals the label collapses to its first three characters
-        // so the prompt stays compact.
+        // Reasoning effort: `◉ <effort>` with the dot color-coded by tier.
+        // `Effort::None` is suppressed. On narrow terminals the label collapses
+        // to its first three characters so the prompt stays compact.
         if let Some(ref effort) = self.reasoning_effort
             && !matches!(effort, Effort::None)
         {
-            let effort_label = effort_label(effort, term_width());
-            let color = if active {
-                Color::Yellow
-            } else {
-                Color::DarkGray
-            };
-            write!(result, " {}", Style::new().fg(color).paint(&effort_label)).unwrap();
+            let value = effort_label(effort, term_width()).to_lowercase();
+            let dot_color = effort_color(effort);
+            write!(
+                result,
+                " {} {}",
+                Style::new().fg(dot_color).paint(STATUS_DOT),
+                Style::new().bold().fg(dot_color).paint(&value),
+            )
+            .unwrap();
         }
 
         Cow::Owned(result)
@@ -258,6 +217,20 @@ fn term_width() -> usize {
         .unwrap_or(80)
 }
 
+/// Maps a reasoning [`Effort`] tier to a status colour, ascending from
+/// dim (minimal) to bright red (max). Mirrors a battery / temperature gauge so
+/// the user can read the active tier at a glance.
+fn effort_color(effort: &Effort) -> Color {
+    match effort {
+        Effort::None | Effort::Minimal => Color::DarkGray,
+        Effort::Low => Color::Green,
+        Effort::Medium => Color::Yellow,
+        Effort::High => Color::Rgb(255, 165, 0), // orange
+        Effort::XHigh => Color::LightRed,
+        Effort::Max => Color::LightPurple,
+    }
+}
+
 /// Formats an [`Effort`] as its uppercase label, collapsing to the first three
 /// characters on narrow terminals (< [`WIDE_TERMINAL_THRESHOLD`] columns).
 fn effort_label(effort: &Effort, width: usize) -> String {
@@ -283,8 +256,6 @@ mod tests {
             ForgePrompt {
                 cwd: PathBuf::from("."),
                 usage: None,
-                agent_id: AgentId::default(),
-                model: None,
                 reasoning_effort: None,
                 git_branch: None,
             }
@@ -296,10 +267,11 @@ mod tests {
         let prompt = ForgePrompt::default();
         let actual = prompt.render_prompt_left();
 
-        // Starship directory icon present
-        assert!(actual.contains(DIR_SYMBOL));
-        // Starship success chevron present
-        assert!(actual.contains(SUCCESS_SYMBOL));
+        // Nerd-Font glyphs gone: no folder icon, no Nerd-Font chevron.
+        assert!(!actual.contains('\u{ea83}'));
+        assert!(!actual.contains('\u{f013e}'));
+        // The input line uses the plain Unicode arrow followed by a space.
+        assert!(actual.contains('\u{276f}'));
     }
 
     #[test]
@@ -307,7 +279,6 @@ mod tests {
         let prompt = ForgePrompt { git_branch: Some("main".to_string()), ..Default::default() };
         let actual = prompt.render_prompt_left();
 
-        // Agent name is on the right prompt, not the left
         // Branch icon and name present
         assert!(actual.contains(BRANCH_SYMBOL));
         assert!(actual.contains("main"));
@@ -315,18 +286,16 @@ mod tests {
 
     #[test]
     fn test_render_prompt_right_inactive() {
-        // No tokens → dimmed agent + model, no token/cost segments
-        let mut prompt = ForgePrompt::default();
-        let _ = prompt.model(ModelId::new("gpt-4"));
+        // No tokens, no model, no effort → right prompt renders nothing.
+        let prompt = ForgePrompt::default();
 
         let actual = prompt.render_prompt_right();
-        // Agent symbol and name present
-        assert!(actual.contains(AGENT_SYMBOL));
-        assert!(actual.contains("FORGE"));
-        // Model symbol and name present
-        assert!(actual.contains(MODEL_SYMBOL));
-        assert!(actual.contains("gpt-4"));
-        // No token count text in inactive state (no humanized number segment)
+        // Agent/model segments are gone; nothing renders without state.
+        assert!(!actual.contains('\u{f167a}'));
+        assert!(!actual.to_uppercase().contains("FORGE"));
+        // No model glyph appears anywhere — model lives in the banner now.
+        assert!(!actual.contains('\u{ec19}'));
+        // No token count text in inactive state.
         assert!(!actual.contains("1k") && !actual.contains("~"));
     }
 
@@ -344,7 +313,9 @@ mod tests {
 
         let actual = prompt.render_prompt_right();
         assert!(actual.contains("~30"));
-        assert!(actual.contains(AGENT_SYMBOL));
+        // Agent and model segments removed regardless of activity state.
+        assert!(!actual.contains('\u{f167a}'));
+        assert!(!actual.contains('\u{ec19}'));
     }
 
     #[test]
@@ -401,25 +372,6 @@ mod tests {
     }
 
     #[test]
-    fn test_render_prompt_right_strips_provider_prefix() {
-        // Model ID like "anthropic/claude-3" should show only "claude-3"
-        let usage = Usage {
-            prompt_tokens: forge_api::TokenCount::Actual(10),
-            completion_tokens: forge_api::TokenCount::Actual(20),
-            total_tokens: forge_api::TokenCount::Actual(30),
-            ..Default::default()
-        };
-        let mut prompt = ForgePrompt::default();
-        let _ = prompt.usage(usage);
-        let _ = prompt.model(ModelId::new("anthropic/claude-3"));
-
-        let actual = prompt.render_prompt_right();
-        assert!(actual.contains("claude-3"));
-        assert!(!actual.contains("anthropic/claude-3"));
-        assert!(actual.contains("30"));
-    }
-
-    #[test]
     fn test_render_prompt_right_with_cost() {
         // Cost shown when active
         let usage = Usage {
@@ -437,25 +389,27 @@ mod tests {
 
     #[test]
     fn test_render_prompt_right_with_reasoning_effort() {
-        // When reasoning effort is set, its uppercase label appears after the
-        // model segment.
+        // Effort renders as `◉ <effort>` with the value in lowercase. The dot
+        // is color-coded by tier; no `:effort` slash hint is shown.
         let mut prompt = ForgePrompt::default();
-        let _ = prompt.model(ModelId::new("gpt-4"));
         let _ = prompt.reasoning_effort(Effort::High);
 
         let actual = prompt.render_prompt_right();
-        assert!(actual.contains("HIGH") || actual.contains("HIG"));
+        assert!(actual.contains(STATUS_DOT));
+        assert!(actual.contains("high") || actual.contains("hig"));
+        assert!(!actual.contains(":effort"));
     }
 
     #[test]
     fn test_render_prompt_right_hides_effort_none() {
-        // `Effort::None` carries no useful info — it must not be rendered.
+        // `Effort::None` carries no useful info — nothing should be rendered
+        // for the effort segment.
         let mut prompt = ForgePrompt::default();
-        let _ = prompt.model(ModelId::new("gpt-4"));
         let _ = prompt.reasoning_effort(Effort::None);
 
         let actual = prompt.render_prompt_right();
         assert!(!actual.to_uppercase().contains("NONE"));
+        assert!(!actual.contains(STATUS_DOT));
     }
 
     #[test]

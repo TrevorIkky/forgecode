@@ -128,6 +128,7 @@ impl ForgeCommandManager {
                 | "mr"
                 | "reasoning-effort"
                 | "re"
+                | "effort"
                 | "config-reasoning-effort"
                 | "cre"
                 | "config-commit-model"
@@ -422,9 +423,10 @@ pub enum AppCommand {
     ConfigReload,
 
     /// Set the reasoning effort level.
-    /// This can be triggered with the '/reasoning-effort' command (alias: re).
-    #[strum(props(usage = "Set reasoning effort for current session [alias: re]"))]
-    #[command(name = "reasoning-effort", alias = "re")]
+    /// This can be triggered with the '/reasoning-effort' command (aliases:
+    /// re, effort).
+    #[strum(props(usage = "Set reasoning effort for current session [aliases: re, effort]"))]
+    #[command(name = "reasoning-effort", aliases = ["re", "effort"])]
     ReasoningEffort,
 
     /// Set the reasoning effort level in global config.
@@ -567,10 +569,11 @@ pub enum AppCommand {
     #[strum(props(usage = "Updates to the latest compatible version of forge"))]
     Update,
 
-    /// Switch to "forge" agent.
-    /// This can be triggered with the '/act' command (alias: forge).
+    /// Switch to the default implementation agent (named "Friday" in the
+    /// persona, identified internally as `forge`).
+    /// Triggered with the '/act' command (aliases: friday, forge).
     #[strum(props(usage = "Enable implementation mode with code changes"))]
-    #[command(name = "act", alias = "forge")]
+    #[command(name = "act", aliases = ["friday", "forge"])]
     Forge,
 
     /// Switch to "muse" agent.
