@@ -165,25 +165,23 @@ impl EditMode for ForgeEditMode {
         let raw: Event = event.into();
 
         if let Event::Paste(ref body) = raw {
-            tracing::info!(
-                paste_bytes = body.len(),
-                paste_lines = body.lines().count(),
-                "ForgeEditMode received bracketed paste"
-            );
-            let wrapped = wrap_pasted_text(body);
-            // If `wrap_pasted_text` rewrote the body (path wrapping kicked
-            // in), insert the wrapped form verbatim. Otherwise consider
-            // hiding the paste behind a placeholder.
-            let insert = if wrapped != *body {
-                tracing::info!("paste rewritten by wrap_pasted_text (path wrap)");
-                wrapped
-            } else if PasteStore::should_placeholder(body) {
-                let ph = self.paste_store.insert(body.clone());
-                tracing::info!(placeholder = %ph, "paste replaced with placeholder");
-                ph
+            // Normalise line endings up front so multi-line pastes that
+            // arrive as CR-only (some terminals) or CRLF (Windows clip)
+            // count as multi-line for the placeholder check.
+            let normalised = body.replace("\r\n", "\n").replace('\r', "\n");
+
+            // Large / multi-line paste → placeholder. This intentionally
+            // takes precedence over the path-wrap helper because path
+            // drag-and-drop always produces a short single-line string;
+            // anything bigger is real content the user shouldn't see
+            // splattered across their prompt.
+            let insert = if PasteStore::should_placeholder(&normalised) {
+                self.paste_store.insert(normalised)
             } else {
-                tracing::info!("paste passed through verbatim (short, no path)");
-                wrapped
+                // Small paste (URL, short snippet, drag-and-drop path):
+                // run the path-wrap helper so `@[...]` references appear
+                // for drag-and-dropped files; otherwise pass through.
+                wrap_pasted_text(&normalised)
             };
             return ReedlineEvent::Edit(vec![EditCommand::InsertString(insert)]);
         }
