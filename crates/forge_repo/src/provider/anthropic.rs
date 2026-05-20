@@ -84,6 +84,11 @@ impl<H: HttpInfra> Anthropic<H> {
                 betas.push("interleaved-thinking-2025-05-14");
             }
             betas.push("structured-outputs-2025-11-13");
+            // SetCache emits `cache_control: { type: "ephemeral", ttl: "1h" }`
+            // by default. The 1-hour TTL requires this beta header — without
+            // it Anthropic silently falls back to the 5-minute default and
+            // long sessions repay for the prefix every time the cache cools.
+            betas.push("extended-cache-ttl-2025-04-11");
             headers.push(("anthropic-beta".to_string(), betas.join(",")));
         }
 

@@ -3,7 +3,7 @@ use std::sync::OnceLock;
 use derive_setters::Setters;
 use regex::Regex;
 use termimad::crossterm::style::{Attribute, Color};
-use termimad::{CompoundStyle, LineStyle, MadSkin};
+use termimad::{Alignment, CompoundStyle, LineStyle, MadSkin, StyledChar};
 
 use crate::code::{CodeBlockParser, SyntaxHighlighter};
 
@@ -24,19 +24,72 @@ impl Default for MarkdownFormat {
     }
 }
 
+/// Claude Code's inline-code colour for dark terminals — a subtle light
+/// blue-purple. Source: `utils/theme.ts` permission token, dark variant.
+const CLAUDE_INLINE_CODE_FG: Color = Color::Rgb {
+    r: 177,
+    g: 185,
+    b: 249,
+};
+
 impl MarkdownFormat {
-    /// Create a new MarkdownFormat with the default skin
+    /// Create a new MarkdownFormat with a Claude-Code-inspired skin: no
+    /// garish yellows or default-cyan inline code, just typographic emphasis
+    /// (bold / italic) plus one subtle blue-purple accent for inline code.
     pub fn new() -> Self {
-        let mut skin = MadSkin::default();
-        let compound_style = CompoundStyle::new(Some(Color::Cyan), None, Default::default());
-        skin.inline_code = compound_style.clone();
+        // Start from `no_style` so termimad's default yellow headers and gray
+        // backgrounds don't leak through. Then layer just the styles we want.
+        let mut skin = MadSkin::no_style();
 
-        let codeblock_style = CompoundStyle::new(None, None, Default::default());
-        skin.code_block = LineStyle::new(codeblock_style, Default::default());
+        // Bold and italic: typographic only, no colour.
+        skin.bold = CompoundStyle::with_attr(Attribute::Bold);
+        skin.italic = CompoundStyle::with_attr(Attribute::Italic);
 
+        // H1 mirrors Claude: bold + italic + underlined, no colour. Other
+        // header levels are bold only. Termimad centres h1 by default; we
+        // override to left-align so headings line up with body copy.
+        for header in skin.headers.iter_mut() {
+            header.compound_style = CompoundStyle::with_attr(Attribute::Bold);
+            header.align = Alignment::Left;
+        }
+        skin.headers[0].compound_style.add_attr(Attribute::Italic);
+        skin.headers[0].compound_style.add_attr(Attribute::Underlined);
+
+        // Inline code: subtle blue-purple, no background. Background tints
+        // are what makes the default termimad skin look "boxy" and bright.
+        skin.inline_code = CompoundStyle::with_fg(CLAUDE_INLINE_CODE_FG);
+
+        // Code fence: no skin colour at all — the syntax highlighter in
+        // `code.rs` paints these lines later, so any skin colour just fights
+        // it.
+        skin.code_block = LineStyle::new(CompoundStyle::default(), Alignment::Left);
+
+        // Strikethrough stays as crossed-out + dim (matches the existing
+        // todo / removed-line rendering).
         let mut strikethrough_style = CompoundStyle::with_attr(Attribute::CrossedOut);
         strikethrough_style.add_attr(Attribute::Dim);
         skin.strikeout = strikethrough_style;
+
+        // List bullet: a plain dash, dimmed. Claude uses `-`; the brighter
+        // termimad default `•` competes with the prose for attention.
+        skin.bullet = StyledChar::new(
+            CompoundStyle::with_attr(Attribute::Dim),
+            '-',
+        );
+
+        // Blockquote bar: dim `▎` (U+258E left quarter block), the same
+        // glyph Claude uses for `> ` quotes.
+        skin.quote_mark = StyledChar::new(
+            CompoundStyle::with_attr(Attribute::Dim),
+            '\u{258E}',
+        );
+
+        // Horizontal rule: dim `─` (U+2500 box-drawing light) — calmer than
+        // termimad's default `―` em dash chain.
+        skin.horizontal_rule = StyledChar::new(
+            CompoundStyle::with_attr(Attribute::Dim),
+            '\u{2500}',
+        );
 
         Self {
             skin,

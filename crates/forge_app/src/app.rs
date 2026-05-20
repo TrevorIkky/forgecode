@@ -148,25 +148,34 @@ impl<S: Services + EnvironmentInfra<Config = forge_config::ForgeConfig>> ForgeAp
         let tracing_handler = TracingHandler::new();
         let title_handler = TitleGenerationHandler::new(services.clone());
 
-        // Build the on_end hook, conditionally adding PendingTodosHandler based on
-        // config
+        // CompactionHandler runs on both on_request (mid-turn safety: catch
+        // a context blowup before the next API call) and on_end (turn
+        // cleanup). It is idempotent — when no work is needed it returns
+        // immediately, and hysteresis in the Compactor keeps it from
+        // looping. See issue #3076.
+        let compaction_handler = CompactionHandler::new(agent.clone(), environment.clone());
         let on_end_hook = if forge_config.verify_todos {
             tracing_handler
                 .clone()
                 .and(title_handler.clone())
                 .and(PendingTodosHandler::new())
+                .and(compaction_handler.clone())
         } else {
-            tracing_handler.clone().and(title_handler.clone())
+            tracing_handler
+                .clone()
+                .and(title_handler.clone())
+                .and(compaction_handler.clone())
         };
 
         let hook = Hook::default()
             .on_start(tracing_handler.clone().and(title_handler))
-            .on_request(tracing_handler.clone().and(DoomLoopDetector::default()))
-            .on_response(
+            .on_request(
                 tracing_handler
                     .clone()
-                    .and(CompactionHandler::new(agent.clone(), environment.clone())),
+                    .and(DoomLoopDetector::default())
+                    .and(compaction_handler),
             )
+            .on_response(tracing_handler.clone())
             .on_toolcall_start(tracing_handler.clone())
             .on_toolcall_end(tracing_handler)
             .on_end(on_end_hook);

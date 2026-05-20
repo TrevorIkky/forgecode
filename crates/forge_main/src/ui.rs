@@ -324,12 +324,37 @@ impl<A: API + ConsoleWriter + 'static, F: Fn(ForgeConfig) -> A + Send + Sync> UI
         // Prompt the user for input. Model is no longer rendered on the right
         // prompt — it lives in the startup banner.
         let reasoning_effort = self.api.get_reasoning_effort().await.ok().flatten();
+        // Look up the active model's context window so the right prompt can
+        // render a context-utilization pie glyph. The lookup is cheap because
+        // `hydrate_caches` warms `get_models` at session start.
+        let context_window = {
+            let model_id = self
+                .get_agent_model(self.api.get_active_agent().await)
+                .await;
+            match model_id {
+                Some(id) => self
+                    .api
+                    .get_models()
+                    .await
+                    .ok()
+                    .and_then(|list| {
+                        list.into_iter()
+                            .find(|m| m.id == id)
+                            .and_then(|m| m.context_length)
+                    })
+                    .and_then(|n| usize::try_from(n).ok()),
+                None => None,
+            }
+        };
         let mut forge_prompt = ForgePrompt::new(self.state.cwd.clone());
         if let Some(u) = usage {
             forge_prompt.usage(u);
         }
         if let Some(e) = reasoning_effort {
             forge_prompt.reasoning_effort(e);
+        }
+        if let Some(w) = context_window {
+            forge_prompt.context_window(w);
         }
         self.console.prompt(&mut forge_prompt).await
     }

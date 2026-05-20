@@ -47,6 +47,18 @@ impl DiffResult {
 pub struct DiffFormat;
 
 impl DiffFormat {
+    /// Renders a unified diff with an optional bold file-path header.
+    ///
+    /// Matches the visual style Claude Code uses for write/edit tool output:
+    /// bold path on the first line, then a unified diff with line numbers,
+    /// green additions, red deletions, and dim context.
+    pub fn format_with_path(path: &str, old: &str, new: &str) -> DiffResult {
+        let mut diff = Self::format(old, new);
+        let header = format!("{}\n", style(path).bold());
+        diff.result.insert_str(0, &header);
+        diff
+    }
+
     pub fn format(old: &str, new: &str) -> DiffResult {
         let diff = TextDiff::from_lines(old, new);
         let ops = diff.grouped_ops(3);
@@ -96,7 +108,7 @@ impl DiffFormat {
                         }
                         ChangeTag::Insert => {
                             lines_added += 1;
-                            ("+", Style::new().yellow())
+                            ("+", Style::new().green())
                         }
                         ChangeTag::Equal => (" ", Style::new().dim()),
                     };

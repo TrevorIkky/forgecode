@@ -11,6 +11,7 @@ mod input;
 mod logs;
 mod model;
 mod oauth_callback;
+mod paste_store;
 mod porcelain;
 mod prompt;
 mod sandbox;

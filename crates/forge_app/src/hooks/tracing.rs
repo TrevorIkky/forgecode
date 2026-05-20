@@ -65,12 +65,25 @@ impl EventHandle<EventData<ResponsePayload>> for TracingHandler {
         let message = &event.payload.message;
 
         if let Some(context) = &conversation.context {
+            // Compute cache hit ratio so the cache effectiveness is grep-able
+            // from logs without having to do the math after the fact. A
+            // healthy long conversation should see this approach 1.0 after
+            // the first turn (system + tools + history all cached).
+            let prompt = *message.usage.prompt_tokens;
+            let cached = *message.usage.cached_tokens;
+            let cache_hit_ratio = if prompt > 0 {
+                (cached as f64) / (prompt as f64)
+            } else {
+                0.0
+            };
+
             info!(
                 conversation_id = %conversation.id,
                 conversation_length = context.messages.len(),
                 token_usage = format!("{}", message.usage.prompt_tokens),
                 total_tokens = format!("{}", message.usage.total_tokens),
                 cached_tokens = format!("{}", message.usage.cached_tokens),
+                cache_hit_ratio = format!("{:.2}", cache_hit_ratio),
                 cost = message.usage.cost.unwrap_or_default(),
                 finish_reason = message.finish_reason.as_ref().map_or("", |reason| reason.into()),
                 "Processing usage information"

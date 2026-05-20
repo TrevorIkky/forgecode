@@ -1,5 +1,17 @@
 use forge_domain::{Todo, TodoStatus};
 
+/// Font-agnostic Unicode glyph for a todo status. Matches the style Claude
+/// Code uses (basic Unicode squares and check marks) so the prompt renders
+/// identically on terminals without a Nerd Font.
+fn todo_glyph(status: &TodoStatus) -> &'static str {
+    match status {
+        TodoStatus::Completed => "✔",   // U+2714 heavy check mark
+        TodoStatus::InProgress => "◼",  // U+25FC black medium square
+        TodoStatus::Pending => "◻",     // U+25FB white medium square
+        TodoStatus::Cancelled => "✖",   // U+2716 heavy multiplication x
+    }
+}
+
 /// Controls the styling applied to a rendered todo line.
 enum TodoLineStyle {
     /// Bold styling used for new or changed todos.
@@ -17,12 +29,7 @@ enum TodoLineStyle {
 fn format_todo_line(todo: &Todo, line_style: TodoLineStyle) -> String {
     use console::style;
 
-    let checkbox = match todo.status {
-        TodoStatus::Completed => "󰄵",
-        TodoStatus::InProgress => "󰄗",
-        TodoStatus::Pending => "󰄱",
-        TodoStatus::Cancelled => "󰅙",
-    };
+    let checkbox = todo_glyph(&todo.status);
 
     let content = match todo.status {
         TodoStatus::Completed | TodoStatus::Cancelled => {
@@ -85,16 +92,13 @@ pub(crate) fn format_todos_diff(before: &[Todo], after: &[Todo]) -> String {
                 // Removed completed: dimmed white checkmark (historical done)
                 result.push_str(&format!(
                     "  {}\n",
-                    style(format!("󰄵 {content}")).white().dim()
+                    style(format!("{} {content}", todo_glyph(&TodoStatus::Completed)))
+                        .white()
+                        .dim()
                 ));
             } else {
                 // Removed non-completed: use the correct status icon in red
-                let checkbox = match before_todo.status {
-                    TodoStatus::InProgress => "󰄗",
-                    TodoStatus::Pending => "󰄱",
-                    TodoStatus::Cancelled => "󰅙",
-                    TodoStatus::Completed => "󰄵",
-                };
+                let checkbox = todo_glyph(&before_todo.status);
                 result.push_str(&format!(
                     "  {}\n",
                     style(format!("{checkbox} {content}")).red()
@@ -209,9 +213,9 @@ mod tests {
             Vec::new(),
         );
 
-        // Verify icon (strip color) — must be 󰄗, NOT 󰄱
+        // Verify icon (strip color) — must be ◼ (in_progress), NOT ◻ (pending)
         let plain = fixture_todo_write_output(setup.0.clone(), setup.1.clone());
-        let expected_plain = "\n  󰄗 Write migrations\n";
+        let expected_plain = "\n  ◼ Write migrations\n";
         assert_eq!(plain, expected_plain);
 
         let raw = fixture_todo_write_output_raw(setup.0, setup.1);
@@ -226,7 +230,7 @@ mod tests {
         );
 
         let plain = fixture_todo_write_output(setup.0.clone(), setup.1.clone());
-        let expected_plain = "\n  󰄱 Pending task\n";
+        let expected_plain = "\n  ◻ Pending task\n";
         assert_eq!(plain, expected_plain);
 
         let raw = fixture_todo_write_output_raw(setup.0, setup.1);
@@ -269,7 +273,7 @@ mod tests {
         );
 
         let actual = fixture_todo_write_output(setup.0, setup.1);
-        let expected = "\n  󰄵 Done\n";
+        let expected = "\n  ✔ Done\n";
 
         assert_eq!(actual, expected);
     }
@@ -284,7 +288,7 @@ mod tests {
         ];
 
         let actual = strip_ansi_codes(super::format_todos(&setup).as_str()).to_string();
-        let expected = "\n  󰄱 Second\n  󰄱 First\n";
+        let expected = "\n  ◻ Second\n  ◻ First\n";
 
         assert_eq!(actual, expected);
     }
@@ -342,19 +346,19 @@ mod tests {
         ];
 
         let actual_1 = fixture_todo_write_output(Vec::new(), step_1.clone());
-        let expected_1 = "\n  󰄗 Generate JSONL input file with all 59 cases\n  󰄱 Create JSON schema file for structured output\n  󰄱 Create system prompt template\n  󰄱 Create user prompt template\n  󰄱 Test with 2-3 cases first\n  󰄱 Run for all cases\n";
+        let expected_1 = "\n  ◼ Generate JSONL input file with all 59 cases\n  ◻ Create JSON schema file for structured output\n  ◻ Create system prompt template\n  ◻ Create user prompt template\n  ◻ Test with 2-3 cases first\n  ◻ Run for all cases\n";
         assert_eq!(actual_1, expected_1);
 
         let actual_2 = fixture_todo_write_output(step_1.clone(), step_2.clone());
-        let expected_2 = "\n  󰄵 Generate JSONL input file with all 59 cases\n  󰄗 Create JSON schema file for structured output\n  󰄱 Create system prompt template\n  󰄱 Create user prompt template\n  󰄱 Test with 2-3 cases first\n  󰄱 Run for all cases\n";
+        let expected_2 = "\n  ✔ Generate JSONL input file with all 59 cases\n  ◼ Create JSON schema file for structured output\n  ◻ Create system prompt template\n  ◻ Create user prompt template\n  ◻ Test with 2-3 cases first\n  ◻ Run for all cases\n";
         assert_eq!(actual_2, expected_2);
 
         let actual_3 = fixture_todo_write_output(step_2.clone(), step_3.clone());
-        let expected_3 = "\n  󰄵 Generate JSONL input file with all 59 cases\n  󰄵 Create JSON schema file for structured output\n  󰄗 Create system prompt template\n  󰄱 Create user prompt template\n  󰄱 Test with 2-3 cases first\n  󰄱 Run for all cases\n";
+        let expected_3 = "\n  ✔ Generate JSONL input file with all 59 cases\n  ✔ Create JSON schema file for structured output\n  ◼ Create system prompt template\n  ◻ Create user prompt template\n  ◻ Test with 2-3 cases first\n  ◻ Run for all cases\n";
         assert_eq!(actual_3, expected_3);
 
         let actual_4 = fixture_todo_write_output(step_3, step_4);
-        let expected_4 = "\n  󰄵 Create JSON schema file for structured output\n  󰄵 Create system prompt template\n  󰄵 Create user prompt template\n  󰄗 Test with 2-3 cases first\n  󰄱 Run for all cases\n";
+        let expected_4 = "\n  ✔ Create JSON schema file for structured output\n  ✔ Create system prompt template\n  ✔ Create user prompt template\n  ◼ Test with 2-3 cases first\n  ◻ Run for all cases\n";
         assert_eq!(actual_4, expected_4);
     }
 }

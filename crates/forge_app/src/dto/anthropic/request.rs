@@ -48,7 +48,7 @@ pub struct SystemMessage {
 impl SystemMessage {
     pub fn cached(mut self, cached: bool) -> Self {
         self.cache_control = if cached {
-            Some(CacheControl::Ephemeral)
+            Some(CacheControl::one_hour())
         } else {
             None
         };
@@ -389,7 +389,7 @@ impl Default for Content {
 
 impl Content {
     pub fn cached(self, enable_cache: bool) -> Self {
-        let cache_control = enable_cache.then_some(CacheControl::Ephemeral);
+        let cache_control = enable_cache.then(CacheControl::one_hour);
 
         match self {
             Content::Text { text, .. } => Content::Text { text, cache_control },
@@ -454,10 +454,25 @@ impl TryFrom<forge_domain::ToolResult> for Content {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CacheControl {
-    Ephemeral,
+    Ephemeral {
+        /// Cache TTL: `"5m"` (Anthropic default) or `"1h"` (requires the
+        /// `extended-cache-ttl-2025-04-11` beta header). Omitting the field
+        /// gets the 5-minute default. Forge prefers `"1h"` because the
+        /// post-summary prefix needs to survive long tool turns and the
+        /// idle stretches between user inputs.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        ttl: Option<String>,
+    },
+}
+
+impl CacheControl {
+    /// Cache breakpoint with the 1-hour extended TTL.
+    pub fn one_hour() -> Self {
+        Self::Ephemeral { ttl: Some("1h".to_string()) }
+    }
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Clone, Debug)]
@@ -523,12 +538,40 @@ impl TryFrom<forge_domain::ToolDefinition> for ToolDefinition {
     }
 }
 
+impl ToolDefinition {
+    /// Whether this tool definition carries a cache breakpoint.
+    /// Used by tests; production set/clear happens in
+    /// `transforms::set_cache::SetCache`.
+    pub fn is_cached(&self) -> bool {
+        self.cache_control.is_some()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use forge_domain::{Context, ReasoningConfig};
     use pretty_assertions::assert_eq;
 
     use super::*;
+
+    #[test]
+    fn test_cache_control_one_hour_serializes_with_ttl() {
+        let cache = CacheControl::one_hour();
+        let actual = serde_json::to_value(&cache).unwrap();
+        let expected = serde_json::json!({
+            "type": "ephemeral",
+            "ttl": "1h"
+        });
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn test_cache_control_default_ephemeral_omits_ttl_when_none() {
+        let cache = CacheControl::Ephemeral { ttl: None };
+        let actual = serde_json::to_value(&cache).unwrap();
+        let expected = serde_json::json!({"type": "ephemeral"});
+        assert_eq!(actual, expected);
+    }
 
     #[test]
     fn test_thinking_enabled_serializes_with_budget() {

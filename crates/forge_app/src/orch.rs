@@ -279,6 +279,16 @@ impl<S: AgentService + EnvironmentInfra<Config = forge_config::ForgeConfig>> Orc
                 .handle(&request_event, &mut self.conversation)
                 .await?;
 
+            // on_request hooks (e.g. CompactionHandler) may mutate
+            // conversation.context. Pull the latest version back into the
+            // local `context` so the request we're about to send reflects
+            // any compaction. Without this, mid-turn compaction would only
+            // apply on the *next* iteration — which is too late if the
+            // current context already exceeds the model's hard limit.
+            if let Some(updated_context) = &self.conversation.context {
+                context = updated_context.clone();
+            }
+
             let message = crate::retry::retry_with_config(
                 &self.config.clone().retry.unwrap_or_default(),
                 || {

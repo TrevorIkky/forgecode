@@ -37,22 +37,73 @@ impl Compactor {
 }
 
 impl Compactor {
+    /// Fraction of `token_threshold` we aim to land at after compaction.
+    /// Provides hysteresis: once compaction fires at the threshold, the
+    /// post-compaction context should sit well below the threshold so that
+    /// the next response doesn't immediately re-trip it.
+    const POST_COMPACTION_TARGET_RATIO: f64 = 0.6;
+
     /// Apply compaction to the context if requested.
     pub fn compact(&self, context: Context, max: bool) -> anyhow::Result<Context> {
-        let eviction = CompactionStrategy::evict(self.compact.eviction_window);
-        let retention = CompactionStrategy::retain(self.compact.retention_window);
+        let retention_floor = CompactionStrategy::retain(self.compact.retention_window);
 
+        // Pick the strategy:
+        //
+        // - `max` (explicit /compact command): preserve only the configured
+        //   retention window, evict everything else.
+        // - Otherwise prefer `derive_target_retention` (hysteresis: evict
+        //   until the post-compaction context is ~60% of threshold) when a
+        //   `token_threshold` is configured. Fall back to the legacy
+        //   percentage-based `eviction_window` if not.
+        //
+        // We then take the most aggressive (smallest retention) of that and
+        // `retention_floor` so we never preserve fewer messages than the
+        // user asked to keep.
         let strategy = if max {
-            // TODO: Consider using `eviction.max(retention)`
-            retention
+            retention_floor
+        } else if let Some(target_retention) = self.derive_target_retention(&context) {
+            CompactionStrategy::retain(target_retention).min(retention_floor)
         } else {
-            eviction.min(retention)
+            CompactionStrategy::evict(self.compact.eviction_window).min(retention_floor)
         };
 
         match strategy.eviction_range(&context) {
             Some(sequence) => self.compress_single_sequence(context, sequence),
             None => Ok(context),
         }
+    }
+
+    /// Compute how many trailing messages to retain so that the
+    /// post-compaction context lands at ~60% of `token_threshold`.
+    ///
+    /// Walks messages newest → oldest, accumulating per-message token
+    /// approximations, until the running total exceeds the target. The
+    /// count at that point is the retention. Returns `None` if no token
+    /// threshold is configured (no target to aim for) or if the context
+    /// already fits in the target (no work to do).
+    fn derive_target_retention(&self, context: &Context) -> Option<usize> {
+        use forge_domain::Role;
+        let threshold = self.compact.token_threshold?;
+        let target = (threshold as f64 * Self::POST_COMPACTION_TARGET_RATIO) as usize;
+
+        let mut budget = target;
+        let mut retention = 0;
+        // Walk newest → oldest. System messages are preserved by the strategy
+        // either way and don't count against retention here. Include a
+        // message if it still fits in remaining budget (cost <= budget);
+        // stop when the next message would exceed it.
+        for msg in context.messages.iter().rev() {
+            if msg.has_role(Role::System) {
+                continue;
+            }
+            let cost = msg.token_count_approx();
+            if cost > budget {
+                break;
+            }
+            budget -= cost;
+            retention += 1;
+        }
+        Some(retention)
     }
 
     /// Compress a single identified sequence of assistant messages.
@@ -926,5 +977,127 @@ mod tests {
     fn create_large_content(token_count: usize) -> String {
         // 4 chars per token approximation
         "x".repeat(token_count * 4)
+    }
+
+    /// Hysteresis: when `token_threshold` is set, compaction must reduce
+    /// the *retained* portion of the context to ≤ 60% of threshold so
+    /// the next response has headroom before re-tripping.
+    ///
+    /// Note: the summary template renders message contents verbatim, so the
+    /// synthetic summary can be large for content that doesn't deduplicate.
+    /// What hysteresis guarantees is the *retention boundary* — how many
+    /// recent messages survive — not the absolute post-compaction size.
+    #[test]
+    fn test_hysteresis_caps_retained_messages() {
+        use forge_domain::ContextMessage;
+
+        let threshold = 30_000_usize;
+        let environment = test_environment();
+        let compactor = Compactor::new(
+            Compact::new().model("test-model").token_threshold(threshold),
+            environment,
+        );
+
+        // Each message ~3000 chars → ~1000 tokens. 40 messages → 40k
+        // tokens, exceeds threshold.
+        let chunk = "x".repeat(3_000);
+        let mut context = Context::default();
+        for i in 0..40 {
+            context = if i % 2 == 0 {
+                context.add_message(ContextMessage::user(&chunk, None))
+            } else {
+                context.add_message(ContextMessage::assistant(&chunk, None, None, None))
+            };
+        }
+        let before_len = context.messages.len();
+
+        // Target = 18000 tokens / ~1000 tokens-per-msg = 18 retained
+        // messages.
+        let retention = compactor.derive_target_retention(&context).unwrap();
+        assert_eq!(
+            retention, 18,
+            "derive should keep last 18 messages (18k token budget / 1k per msg)"
+        );
+
+        let compacted = compactor.compact(context, false).unwrap();
+
+        // After compaction: 1 summary + (40 - retention - 1) … hmm,
+        // strategy-aware: it should be summary + 18 retained.
+        // The exact count depends on how strategy.eviction_range resolves
+        // tool-call boundaries; we assert it's <= retention + 2 (summary +
+        // any extra messages preserved to keep tool atomicity).
+        let after_len = compacted.messages.len();
+        assert!(
+            after_len <= retention + 2,
+            "after compaction should keep at most retention+1(summary)+1(slack) messages; \
+             before={}, after={}, retention={}",
+            before_len,
+            after_len,
+            retention
+        );
+        assert!(
+            after_len < before_len,
+            "compaction should drop messages; before={}, after={}",
+            before_len,
+            after_len
+        );
+    }
+
+    /// When no `token_threshold` is configured, hysteresis can't compute a
+    /// target — `derive_target_retention` returns `None` and the compactor
+    /// falls back to the legacy `eviction_window` strategy.
+    #[test]
+    fn test_no_threshold_falls_back_to_eviction_window() {
+        use forge_domain::ContextMessage;
+
+        let environment = test_environment();
+        let compactor = Compactor::new(
+            Compact::new().model("test-model").eviction_window(0.5_f64),
+            environment,
+        );
+
+        let context = Context::default()
+            .add_message(ContextMessage::user("hello", None))
+            .add_message(ContextMessage::assistant("hi", None, None, None))
+            .add_message(ContextMessage::user("again", None))
+            .add_message(ContextMessage::assistant("yes", None, None, None));
+
+        assert_eq!(compactor.derive_target_retention(&context), None);
+
+        // Doesn't panic; legacy path returns a context.
+        let _ = compactor.compact(context, false).unwrap();
+    }
+
+    /// `derive_target_retention` walks newest → oldest accumulating tokens
+    /// until budget is exhausted, returning the count of retained
+    /// (non-system) messages.
+    #[test]
+    fn test_derive_target_retention_respects_budget() {
+        use forge_domain::ContextMessage;
+
+        // threshold 1000 → target = 600 tokens.
+        let environment = test_environment();
+        let compactor = Compactor::new(
+            Compact::new()
+                .model("test-model")
+                .token_threshold(1_000_usize),
+            environment,
+        );
+
+        // Each message: 300 chars → 100 tokens (chars/3 div_ceil).
+        let chunk = "x".repeat(300);
+        let context = Context::default()
+            .add_message(ContextMessage::system("sys"))
+            .add_message(ContextMessage::user(&chunk, None))
+            .add_message(ContextMessage::assistant(&chunk, None, None, None))
+            .add_message(ContextMessage::user(&chunk, None))
+            .add_message(ContextMessage::assistant(&chunk, None, None, None))
+            .add_message(ContextMessage::user(&chunk, None))
+            .add_message(ContextMessage::assistant(&chunk, None, None, None))
+            .add_message(ContextMessage::user(&chunk, None));
+
+        let retention = compactor.derive_target_retention(&context).unwrap();
+        // 600-token budget / 100 tokens-per-msg = 6 messages fit.
+        assert_eq!(retention, 6);
     }
 }

@@ -14,6 +14,7 @@ use super::completer::InputCompleter;
 use super::zsh::paste::wrap_pasted_text;
 use crate::highlighter::ForgeHighlighter;
 use crate::model::ForgeCommandManager;
+use crate::paste_store::PasteStore;
 use crate::prompt::ForgePrompt;
 
 // TODO: Store the last `HISTORY_CAPACITY` commands in the history file
@@ -22,6 +23,7 @@ const COMPLETION_MENU: &str = "completion_menu";
 
 pub struct ForgeEditor {
     editor: Reedline,
+    paste_store: PasteStore,
 }
 
 pub enum ReadResult {
@@ -88,7 +90,8 @@ impl ForgeEditor {
                 .with_selected_text_style(Style::new().on(Color::White).fg(Color::Black)),
         );
 
-        let edit_mode = Box::new(ForgeEditMode::new(Self::init()));
+        let paste_store = PasteStore::new();
+        let edit_mode = Box::new(ForgeEditMode::new(Self::init(), paste_store.clone()));
 
         let editor = Reedline::create()
             .with_completer(Box::new(InputCompleter::new(env.cwd, manager)))
@@ -102,7 +105,14 @@ impl ForgeEditor {
             .with_quick_completions(true)
             .with_ansi_colors(true)
             .use_bracketed_paste(true);
-        Self { editor }
+        Self { editor, paste_store }
+    }
+
+    /// Shared paste store. `Console::prompt` uses this to expand
+    /// `[Pasted text #N]` placeholders into the original content before
+    /// dispatching the input.
+    pub fn paste_store(&self) -> PasteStore {
+        self.paste_store.clone()
     }
 
     pub fn prompt(&mut self, prompt: &mut ForgePrompt) -> anyhow::Result<ReadResult> {
@@ -126,19 +136,26 @@ pub struct ReadLineError(std::io::Error);
 
 /// Custom edit mode that wraps Emacs and intercepts paste events.
 ///
-/// When the terminal sends a bracketed-paste (e.g. from a drag-and-drop),
-/// this mode checks whether the pasted text is an existing file path and,
-/// if so, wraps it in `@[...]` before it reaches the reedline buffer. This
-/// gives the user immediate visual feedback in the input field.
+/// On bracketed-paste:
+/// 1. If the paste is a file path (drag-and-drop), `wrap_pasted_text` turns
+///    it into an `@[…]` reference and we insert that.
+/// 2. Otherwise, if the paste is multi-line or large enough to clutter the
+///    prompt (`PasteStore::should_placeholder`), the real text is stashed in
+///    the shared `PasteStore` and we insert a short `[Pasted text #N]`
+///    placeholder. `Console::prompt` expands the placeholder back to the
+///    real text just before the input is submitted.
+/// 3. Small single-line non-path pastes (URLs, short snippets) are inserted
+///    verbatim — wrapping them would be more friction than help.
 struct ForgeEditMode {
     inner: Emacs,
+    paste_store: PasteStore,
 }
 
 impl ForgeEditMode {
     /// Creates a new `ForgeEditMode` wrapping an Emacs mode with the given
     /// keybindings.
-    fn new(keybindings: reedline::Keybindings) -> Self {
-        Self { inner: Emacs::new(keybindings) }
+    fn new(keybindings: reedline::Keybindings, paste_store: PasteStore) -> Self {
+        Self { inner: Emacs::new(keybindings), paste_store }
     }
 }
 
@@ -148,8 +165,27 @@ impl EditMode for ForgeEditMode {
         let raw: Event = event.into();
 
         if let Event::Paste(ref body) = raw {
+            tracing::info!(
+                paste_bytes = body.len(),
+                paste_lines = body.lines().count(),
+                "ForgeEditMode received bracketed paste"
+            );
             let wrapped = wrap_pasted_text(body);
-            return ReedlineEvent::Edit(vec![EditCommand::InsertString(wrapped)]);
+            // If `wrap_pasted_text` rewrote the body (path wrapping kicked
+            // in), insert the wrapped form verbatim. Otherwise consider
+            // hiding the paste behind a placeholder.
+            let insert = if wrapped != *body {
+                tracing::info!("paste rewritten by wrap_pasted_text (path wrap)");
+                wrapped
+            } else if PasteStore::should_placeholder(body) {
+                let ph = self.paste_store.insert(body.clone());
+                tracing::info!(placeholder = %ph, "paste replaced with placeholder");
+                ph
+            } else {
+                tracing::info!("paste passed through verbatim (short, no path)");
+                wrapped
+            };
+            return ReedlineEvent::Edit(vec![EditCommand::InsertString(insert)]);
         }
 
         // For every other event, delegate to the inner Emacs mode.

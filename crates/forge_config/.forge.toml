@@ -58,12 +58,22 @@ read_timeout_secs = 900
 tls_backend = "default"
 
 [compact]
+# Fallback eviction window for cases where no token_threshold is set.
+# When token_threshold IS set (the default), the compactor uses hysteresis
+# to land at ~60% of threshold — see Compactor::derive_target_retention.
 eviction_window = 0.2
 max_tokens = 2000
 message_threshold = 200
 on_turn_end = false
-retention_window = 6
-token_threshold = 100000
+# Wide enough that a single tool-heavy turn (~6+ messages) doesn't pin the
+# floor and starve the percentage-driven budget below.
+retention_window = 20
+# Threshold is derived as a percentage of the resolved model context window
+# (minus an output reserve) in Agent::compaction_threshold. We deliberately
+# do NOT set an absolute token_threshold here so the percentage scales with
+# the model — a 1M-context model can actually use ~890k before compaction
+# while a 200k model triggers at ~172k.
+token_threshold_percentage = 0.9
 
 [updates]
 auto_update = true

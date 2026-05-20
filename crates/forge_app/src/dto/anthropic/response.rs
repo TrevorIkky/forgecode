@@ -77,10 +77,20 @@ impl From<Model> for forge_domain::Model {
 ///   header
 /// - Legacy models may have different context lengths
 fn get_context_length(model_id: &str) -> Option<u64> {
+    // 1M-context beta variants (Sonnet 4.5 and Opus 4.7 ship a 1M variant
+    // gated by the `context-1m-2025-08-07` beta header). The model id surface
+    // is either the bracketed `[1m]` suffix used in some clients or an
+    // explicit `-1m` suffix; match both.
+    if model_id.contains("[1m]") || model_id.ends_with("-1m") {
+        return Some(1_000_000);
+    }
+
     // Current models (200K context)
     if model_id.starts_with("claude-sonnet-4-5-")
+        || model_id.starts_with("claude-sonnet-4-6")
         || model_id.starts_with("claude-haiku-4-5-")
         || model_id.starts_with("claude-opus-4-1-")
+        || model_id.starts_with("claude-opus-4-7")
     {
         return Some(200_000);
     }
@@ -123,7 +133,17 @@ fn get_context_length(model_id: &str) -> Option<u64> {
         return Some(100_000);
     }
 
-    // Unknown model
+    // Forward-safe default: any unrecognized `claude-*` id assumes 200K,
+    // which is the current floor for every shipping Claude model. A future
+    // model raising the window will be underestimated (safe) until this
+    // map is updated; without this clause it would fall through to the
+    // 128K DEFAULT_CONTEXT_WINDOW in Agent::compaction_threshold and the
+    // user would silently lose half their usable context.
+    if model_id.starts_with("claude-") {
+        return Some(200_000);
+    }
+
+    // Unknown non-Claude model
     None
 }
 
@@ -757,10 +777,41 @@ mod tests {
 
     #[test]
     fn test_get_context_length_unknown_model() {
-        // Unknown models should return None
+        // Non-Claude unknown models still return None.
         assert_eq!(get_context_length("unknown-model"), None);
-        assert_eq!(get_context_length("claude-future-5-0"), None);
         assert_eq!(get_context_length(""), None);
+        // Any unrecognized `claude-*` id defaults to 200K (the current floor
+        // for every shipping Claude model), so a brand-new model the binary
+        // hasn't been updated for still gets a sensible window instead of
+        // silently falling back to 128K.
+        assert_eq!(get_context_length("claude-future-5-0"), Some(200_000));
+    }
+
+    #[test]
+    fn test_get_context_length_1m_variants() {
+        // `[1m]` suffix as surfaced by the runtime model id.
+        assert_eq!(
+            get_context_length("claude-opus-4-7[1m]"),
+            Some(1_000_000)
+        );
+        assert_eq!(
+            get_context_length("claude-sonnet-4-5-20250929[1m]"),
+            Some(1_000_000)
+        );
+        // `-1m` suffix style.
+        assert_eq!(
+            get_context_length("claude-sonnet-4-5-1m"),
+            Some(1_000_000)
+        );
+    }
+
+    #[test]
+    fn test_get_context_length_opus_4_7() {
+        assert_eq!(get_context_length("claude-opus-4-7"), Some(200_000));
+        assert_eq!(
+            get_context_length("claude-opus-4-7-20251201"),
+            Some(200_000)
+        );
     }
 
     #[test]

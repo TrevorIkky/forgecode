@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use forge_display::DiffFormat;
 use forge_domain::{ChatResponseContent, Environment, TitleFormat};
 
@@ -12,21 +14,28 @@ impl FormatContent for ToolOperation {
             ToolOperation::FsWrite { input, output } => {
                 if let Some(ref before) = output.before {
                     let after = &input.content;
+                    let path = format_display_path(Path::new(&output.path), &env.cwd);
                     Some(ChatResponseContent::ToolOutput(
-                        DiffFormat::format(before, after).diff().to_string(),
+                        DiffFormat::format_with_path(&path, before, after)
+                            .diff()
+                            .to_string(),
                     ))
                 } else {
                     None
                 }
             }
-            ToolOperation::FsPatch { input: _, output } => Some(ChatResponseContent::ToolOutput(
-                DiffFormat::format(&output.before, &output.after)
-                    .diff()
-                    .to_string(),
-            )),
-            ToolOperation::FsMultiPatch { input: _, output } => {
+            ToolOperation::FsPatch { input, output } => {
+                let path = format_display_path(Path::new(&input.file_path), &env.cwd);
                 Some(ChatResponseContent::ToolOutput(
-                    DiffFormat::format(&output.before, &output.after)
+                    DiffFormat::format_with_path(&path, &output.before, &output.after)
+                        .diff()
+                        .to_string(),
+                ))
+            }
+            ToolOperation::FsMultiPatch { input, output } => {
+                let path = format_display_path(Path::new(&input.file_path), &env.cwd);
+                Some(ChatResponseContent::ToolOutput(
+                    DiffFormat::format_with_path(&path, &output.before, &output.after)
                         .diff()
                         .to_string(),
                 ))
@@ -70,6 +79,7 @@ mod tests {
     use super::FormatContent;
     // ContentFormat is now ChatResponseContent
     use crate::operation::ToolOperation;
+    use crate::utils::format_display_path;
     use crate::{
         Content, FsRemoveOutput, FsUndoOutput, FsWriteOutput, HttpResponse, Match, MatchResult,
         PatchOutput, ReadOutput, ResponseContext, SearchResult, ShellOutput,
@@ -169,8 +179,12 @@ mod tests {
         let env = fixture_environment();
 
         let actual = fixture.to_content(&env);
+        let path = format_display_path(
+            std::path::Path::new("/home/user/project/existing_file.txt"),
+            &env.cwd,
+        );
         let expected = Some(ChatResponseContent::ToolOutput(
-            DiffFormat::format("old content", "new content")
+            DiffFormat::format_with_path(&path, "old content", "new content")
                 .diff()
                 .to_string(),
         ));

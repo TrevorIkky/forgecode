@@ -87,7 +87,13 @@ impl ContextMessage {
 
     /// Estimates the number of tokens in a message using character-based
     /// approximation.
-    /// ref: https://github.com/openai/codex/blob/main/codex-cli/src/utils/approximate-tokens-used.ts
+    ///
+    /// Uses a chars/3 divisor (rather than the more common chars/4 used for
+    /// English prose) because forge contexts are dominated by code, JSON,
+    /// markdown with backticks/pipes, and tool-call payloads — content that
+    /// tokenizes denser. Underestimating drove the runaway compaction in
+    /// issue #3076. ref:
+    /// https://github.com/openai/codex/blob/main/codex-cli/src/utils/approximate-tokens-used.ts
     pub fn token_count_approx(&self) -> usize {
         let char_count = match self {
             ContextMessage::Text(text_message) => {
@@ -107,7 +113,7 @@ impl ContextMessage {
             _ => 0,
         };
 
-        char_count.div_ceil(4)
+        char_count.div_ceil(3)
     }
 
     pub fn to_text(&self) -> String {
@@ -613,7 +619,11 @@ impl Context {
             .add_tool_results(tool_results)
     }
 
-    /// Returns the token count for context
+    /// Returns the total token count for the context — the size of the
+    /// conversation as it stands. After a response, this is
+    /// `prompt_tokens + completion_tokens` of the last response, which is
+    /// approximately what the *next* request will send (the just-returned
+    /// assistant message is now part of the context).
     pub fn token_count(&self) -> TokenCount {
         let actual = self
             .messages
@@ -1077,7 +1087,8 @@ mod tests {
                 None,
             ))
             .add_message(ContextMessage::user("I'm looking for a restaurant.", None));
-        assert_eq!(fixture.token_count(), TokenCount::Approx(18));
+        // Per-message: 5→2 + 9→3 + 19→7 + 29→10 = 22 (each div_ceil(3))
+        assert_eq!(fixture.token_count(), TokenCount::Approx(22));
     }
 
     #[test]
@@ -1453,29 +1464,26 @@ mod tests {
 
     #[test]
     fn test_context_message_token_count_approx_user_text() {
-        // Fixture: User text message with 40 characters (10 tokens)
         let fixture = ContextMessage::user("This is a test message with content", None);
         let actual = fixture.token_count_approx();
-        let expected = 9; // 36 chars / 4 = 9 tokens
+        let expected = 12; // 35 chars / 3 = 12 tokens (rounded up)
         assert_eq!(actual, expected);
     }
 
     #[test]
     fn test_context_message_token_count_approx_assistant_text() {
-        // Fixture: Assistant text message
         let fixture =
             ContextMessage::assistant("Hello! How can I help you today?", None, None, None);
         let actual = fixture.token_count_approx();
-        let expected = 8; // 32 chars / 4 = 8 tokens
+        let expected = 11; // 32 chars / 3 = 11 tokens (rounded up)
         assert_eq!(actual, expected);
     }
 
     #[test]
     fn test_context_message_token_count_approx_system() {
-        // Fixture: System message should now be counted in token approximation
         let fixture = ContextMessage::system("System instructions here");
         let actual = fixture.token_count_approx();
-        let expected = 6; // System messages are now counted in the approximation
+        let expected = 8; // 24 chars / 3 = 8 tokens
         assert_eq!(actual, expected);
     }
 
@@ -1502,8 +1510,8 @@ mod tests {
         // Content: "Let me help" = 11 chars
         // Tool call 1: "fs_search" (9 chars) + {"query":"test"} (16 chars) = 25 chars
         // Tool call 2: "calculate" (9 chars) + {"expression":"2+2"} (20 chars) = 29
-        // chars Total: 11 + 25 + 29 = 65 chars / 4 = 17 tokens
-        let expected = 17;
+        // chars Total: 11 + 25 + 29 = 65 chars / 3 = 22 tokens (rounded up)
+        let expected = 22;
         assert_eq!(actual, expected);
     }
 
@@ -1523,11 +1531,11 @@ mod tests {
         let fixture =
             ContextMessage::assistant("Final answer", None, Some(fixture_reasoning), None);
         let actual = fixture.token_count_approx();
-        // Content: "Final answer" = 12 chars = 3 tokens
-        // Reasoning 1: "First reasoning step" = 20 chars = 5 tokens
-        // Reasoning 2: "Second reasoning step" = 21 chars = 6 tokens
-        // Total: 3 + 5 + 6 = 14 tokens
-        let expected = 14;
+        // Content: "Final answer" = 12 chars
+        // Reasoning 1: "First reasoning step" = 20 chars
+        // Reasoning 2: "Second reasoning step" = 21 chars
+        // Total: 12 + 20 + 21 = 53 chars / 3 = 18 tokens (rounded up)
+        let expected = 18;
         assert_eq!(actual, expected);
     }
 
@@ -1540,7 +1548,7 @@ mod tests {
             output: crate::ToolOutput::text("Search results: Found 3 items".to_string()),
         });
         let actual = fixture.token_count_approx();
-        let expected = 8; // 30 chars / 4 = 8 tokens (rounded up)
+        let expected = 10; // 29 chars / 3 = 10 tokens (rounded up)
         assert_eq!(actual, expected);
     }
 
@@ -1573,17 +1581,16 @@ mod tests {
         // Fixture: Empty message
         let fixture = ContextMessage::user("", None);
         let actual = fixture.token_count_approx();
-        let expected = 0; // 0 chars / 4 = 0 tokens
+        let expected = 0; // 0 chars / 3 = 0 tokens
         assert_eq!(actual, expected);
     }
 
     #[test]
     fn test_context_message_token_count_approx_unicode() {
-        // Fixture: Message with Unicode characters
         let fixture = ContextMessage::user("Hello 世界 🌍 émojis", None);
         let actual = fixture.token_count_approx();
-        // "Hello 世界 🌍 émojis" has 18 Unicode characters
-        let expected = 5; // 18 chars / 4 = 5 tokens (rounded up)
+        // "Hello 世界 🌍 émojis" has 17 Unicode chars (via chars().count())
+        let expected = 6; // 17 chars / 3 = 6 tokens (rounded up)
         assert_eq!(actual, expected);
     }
 

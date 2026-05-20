@@ -18,9 +18,14 @@ const MULTILINE_INDICATOR: &str = "::: ";
 // a Nerd-Font patched typeface.
 const BRANCH_SYMBOL: &str = "\u{f418}"; //   branch icon
 
-// Plain Unicode "FISHEYE" (U+25C9) — filled-circle status glyph that renders
-// without requiring a Nerd-Font patched typeface.
-const STATUS_DOT: &str = "\u{25c9}";
+// Context-utilization pie-chart glyphs. Single Unicode characters, font-
+// agnostic (no Nerd Font required). The glyph fills as context fills; the
+// color shifts from green → amber → red as utilization climbs.
+const PIE_EMPTY: &str = "\u{25cb}"; // ○ — 0–12%
+const PIE_QUARTER: &str = "\u{25d4}"; // ◔ — 12–37%
+const PIE_HALF: &str = "\u{25d1}"; // ◑ — 37–62%
+const PIE_THREE_QUARTERS: &str = "\u{25d5}"; // ◕ — 62–87%
+const PIE_FULL: &str = "\u{25cf}"; // ● — 87–100%
 
 /// Terminal width at which the reasoning effort label switches from the
 /// compact three-letter form (e.g. `MED`) to the full uppercase label
@@ -38,6 +43,10 @@ pub struct ForgePrompt {
     /// `Effort::None` is suppressed (see
     /// [`ForgePrompt::render_prompt_right`]).
     pub reasoning_effort: Option<Effort>,
+    /// Context window of the active model in tokens. Used to render the
+    /// context-utilization pie glyph in the right prompt. When `None`, the
+    /// glyph is suppressed.
+    pub context_window: Option<usize>,
     pub git_branch: Option<String>,
 }
 
@@ -50,6 +59,7 @@ impl ForgePrompt {
             cwd,
             usage: None,
             reasoning_effort: None,
+            context_window: None,
             git_branch,
         }
     }
@@ -147,19 +157,45 @@ impl Prompt for ForgePrompt {
             .unwrap();
         }
 
-        // Reasoning effort: `◉ <effort>` with the dot color-coded by tier.
-        // `Effort::None` is suppressed. On narrow terminals the label collapses
-        // to its first three characters so the prompt stays compact.
+        // Context-utilization pie glyph. The glyph fills as the context fills
+        // (○ ◔ ◑ ◕ ●) and is colored green / amber / red by utilization.
+        // Always rendered when the active model's context window is known —
+        // a fresh session shows the empty ○ glyph so the user sees the
+        // indicator from the start. A small dim percent follows the glyph so
+        // on wide-context models (1M Opus) the user gets precise feedback
+        // even while the pie sits in the same bucket for hundreds of K
+        // tokens.
+        if let Some(window) = self.context_window
+            && window > 0
+        {
+            let used = total_tokens
+                .map(|t| (*t as usize).min(window))
+                .unwrap_or(0);
+            let fraction = used as f64 / window as f64;
+            let glyph = pie_glyph(fraction);
+            let color = pie_color(fraction);
+            let percent = (fraction * 100.0).round() as u32;
+            write!(
+                result,
+                " {} {}",
+                Style::new().bold().fg(color).paint(glyph),
+                Style::new().dimmed().paint(format!("{percent}%")),
+            )
+            .unwrap();
+        }
+
+        // Reasoning effort label, color-coded by tier. `Effort::None` is
+        // suppressed. On narrow terminals the label collapses to its first
+        // three characters so the prompt stays compact.
         if let Some(ref effort) = self.reasoning_effort
             && !matches!(effort, Effort::None)
         {
             let value = effort_label(effort, term_width()).to_lowercase();
-            let dot_color = effort_color(effort);
+            let label_color = effort_color(effort);
             write!(
                 result,
-                " {} {}",
-                Style::new().fg(dot_color).paint(STATUS_DOT),
-                Style::new().bold().fg(dot_color).paint(&value),
+                " {}",
+                Style::new().bold().fg(label_color).paint(&value),
             )
             .unwrap();
         }
@@ -217,6 +253,39 @@ fn term_width() -> usize {
         .unwrap_or(80)
 }
 
+/// Maps a context-utilization fraction (0.0–1.0+) to a 5-state pie glyph.
+/// The breakpoints are equal-width quarters anchored on each glyph's centre,
+/// so the transition between glyphs feels balanced.
+fn pie_glyph(fraction: f64) -> &'static str {
+    let f = fraction.clamp(0.0, 1.0);
+    if f < 0.125 {
+        PIE_EMPTY
+    } else if f < 0.375 {
+        PIE_QUARTER
+    } else if f < 0.625 {
+        PIE_HALF
+    } else if f < 0.875 {
+        PIE_THREE_QUARTERS
+    } else {
+        PIE_FULL
+    }
+}
+
+/// Maps a context-utilization fraction to a green/amber/red status colour.
+/// Green up to 70%, amber up to 90%, red beyond. The thresholds line up
+/// with [`Agent::compaction_threshold`]'s default 90% trigger so the glyph
+/// turns red just before compaction kicks in.
+fn pie_color(fraction: f64) -> Color {
+    let f = fraction.clamp(0.0, 1.0);
+    if f < 0.7 {
+        Color::LightGreen
+    } else if f < 0.9 {
+        Color::Rgb(255, 176, 0) // amber
+    } else {
+        Color::LightRed
+    }
+}
+
 /// Maps a reasoning [`Effort`] tier to a status colour, ascending from
 /// dim (minimal) to bright red (max). Mirrors a battery / temperature gauge so
 /// the user can read the active tier at a glance.
@@ -257,6 +326,7 @@ mod tests {
                 cwd: PathBuf::from("."),
                 usage: None,
                 reasoning_effort: None,
+                context_window: None,
                 git_branch: None,
             }
         }
@@ -389,13 +459,12 @@ mod tests {
 
     #[test]
     fn test_render_prompt_right_with_reasoning_effort() {
-        // Effort renders as `◉ <effort>` with the value in lowercase. The dot
-        // is color-coded by tier; no `:effort` slash hint is shown.
+        // Effort renders as a colored lowercase label. The leading pie glyph
+        // is suppressed when no token/window info is available.
         let mut prompt = ForgePrompt::default();
         let _ = prompt.reasoning_effort(Effort::High);
 
         let actual = prompt.render_prompt_right();
-        assert!(actual.contains(STATUS_DOT));
         assert!(actual.contains("high") || actual.contains("hig"));
         assert!(!actual.contains(":effort"));
     }
@@ -409,7 +478,63 @@ mod tests {
 
         let actual = prompt.render_prompt_right();
         assert!(!actual.to_uppercase().contains("NONE"));
-        assert!(!actual.contains(STATUS_DOT));
+    }
+
+    #[test]
+    fn test_pie_glyph_states() {
+        assert_eq!(pie_glyph(0.0), PIE_EMPTY);
+        assert_eq!(pie_glyph(0.05), PIE_EMPTY);
+        assert_eq!(pie_glyph(0.20), PIE_QUARTER);
+        assert_eq!(pie_glyph(0.50), PIE_HALF);
+        assert_eq!(pie_glyph(0.75), PIE_THREE_QUARTERS);
+        assert_eq!(pie_glyph(0.95), PIE_FULL);
+        // Clamp on overshoot.
+        assert_eq!(pie_glyph(1.5), PIE_FULL);
+    }
+
+    #[test]
+    fn test_pie_color_thresholds() {
+        assert_eq!(pie_color(0.10), Color::LightGreen);
+        assert_eq!(pie_color(0.50), Color::LightGreen);
+        assert_eq!(pie_color(0.70), Color::Rgb(255, 176, 0));
+        assert_eq!(pie_color(0.85), Color::Rgb(255, 176, 0));
+        assert_eq!(pie_color(0.90), Color::LightRed);
+        assert_eq!(pie_color(0.99), Color::LightRed);
+    }
+
+    #[test]
+    fn test_render_prompt_right_shows_pie_when_window_known() {
+        // 50% utilization → ◑ in amber-ish green (actually still green since
+        // 0.5 < 0.7), suppressed `%` on narrow terminals but glyph present.
+        let usage = Usage {
+            total_tokens: forge_api::TokenCount::Actual(100_000),
+            ..Default::default()
+        };
+        let mut prompt = ForgePrompt::default();
+        let _ = prompt.usage(usage);
+        let _ = prompt.context_window(200_000_usize);
+
+        let actual = prompt.render_prompt_right();
+        assert!(actual.contains(PIE_HALF), "expected ◑ glyph in {actual:?}");
+    }
+
+    #[test]
+    fn test_render_prompt_right_hides_pie_when_window_unknown() {
+        let usage = Usage {
+            total_tokens: forge_api::TokenCount::Actual(100_000),
+            ..Default::default()
+        };
+        let mut prompt = ForgePrompt::default();
+        let _ = prompt.usage(usage);
+        // context_window deliberately left None.
+
+        let actual = prompt.render_prompt_right();
+        for glyph in [PIE_EMPTY, PIE_QUARTER, PIE_HALF, PIE_THREE_QUARTERS, PIE_FULL] {
+            assert!(
+                !actual.contains(glyph),
+                "expected no pie glyph in {actual:?}, found {glyph}"
+            );
+        }
     }
 
     #[test]

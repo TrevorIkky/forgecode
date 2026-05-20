@@ -38,6 +38,12 @@ impl Console {
                 ReadResult::Exit => return Ok(AppCommand::Exit),
                 ReadResult::Empty => continue,
                 ReadResult::Success(text) => {
+                    // Expand any `[Pasted text #N]` placeholders the user
+                    // collected in the input field back to their real
+                    // content before the command is parsed or sent to the
+                    // model.
+                    let paste_store = self.editor.lock().unwrap().paste_store();
+                    let text = paste_store.expand(&text);
                     tracker::prompt(text.clone());
                     return self.command.parse(&text);
                 }
